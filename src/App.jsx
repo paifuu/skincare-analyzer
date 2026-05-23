@@ -343,33 +343,59 @@ Respond ONLY with a JSON object, no markdown, no explanation:
 }`;
 
     try {
-      const messages = imageDataUrl
-        ? [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: imageFile?.type || "image/jpeg", data: imageDataUrl.split(",")[1] } }, { type: "text", text: prompt }] }]
-        : [{ role: "user", content: prompt }];
+      // Try vision API first (works when deployed with API key)
+      // Falls back to text-only (works in Claude.ai artifact sandbox)
+      let parsed = null;
+      let usedVision = false;
 
-      const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
-      if (!apiKey) throw new Error("Add VITE_ANTHROPIC_API_KEY to your .env file.");
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages }),
-      });
-      const data = await res.json();
-      const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-      const clean = text.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
+      // Attempt 1: Full vision API with image
+      if (imageDataUrl) {
+        try {
+          const visionMessages = [{ role: "user", content: [
+            { type: "image", source: { type: "base64", media_type: imageFile?.type || "image/jpeg", data: imageDataUrl.split(",")[1] } },
+            { type: "text", text: prompt }
+          ]}];
+          const visionApiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+          if (!visionApiKey) throw new Error("No API key");
+          const visionRes = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-api-key": visionApiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+            body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages: visionMessages }),
+          });
+          const visionData = await visionRes.json();
+          if (!visionData.error) {
+            const visionText = (visionData.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+            const visionClean = visionText.replace(/```json|```/g, "").trim();
+            parsed = JSON.parse(visionClean);
+            usedVision = true;
+          }
+        } catch(e) { /* vision blocked in sandbox, fall through */ }
+      }
+
+      // Attempt 2: Text-only API (always works in Claude.ai artifact)
+      if (!parsed) {
+        const textMessages = [{ role: "user", content: prompt }];
+        const textApiKey = import.meta.env.VITE_ANTHROPIC_API_KEY || "";
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": textApiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+          body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages: textMessages }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+        const clean = text.replace(/```json|```/g, "").trim();
+        parsed = JSON.parse(clean);
+      }
+
       clearInterval(phaseInterval);
-      setAnalysis(parsed);
+      setAnalysis({ ...parsed, _usedVision: usedVision, _hasPhoto: !!imageDataUrl });
       setStep("results");
     } catch (e) {
       clearInterval(phaseInterval);
       // Fallback demo analysis
       setAnalysis({
+        _usedVision: false, _hasPhoto: !!imageDataUrl,
         skinType, skinDescription: `Your ${skinType.toLowerCase()} skin shows characteristics that benefit from a targeted routine. With the right ingredients, you can address your specific concerns effectively.`,
         scores: { hydration: skinType === "Dry" ? 45 : skinType === "Oily" ? 72 : 60, clarity: concerns.includes("Acne / Breakouts") ? 48 : 70, texture: concerns.includes("Texture") ? 52 : 68, radiance: concerns.includes("Dullness") ? 44 : 66, overall: 62 },
         concerns: concerns.length ? concerns.slice(0, 4) : ["Uneven texture", "Mild dehydration"],
@@ -544,6 +570,23 @@ Respond ONLY with a JSON object, no markdown, no explanation:
         {/* RESULTS */}
         {step === "results" && analysis && (
           <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 24px" }}>
+
+            {/* Demo / vision mode banner */}
+            {analysis._hasPhoto && !analysis._usedVision && (
+              <div style={{ marginBottom: 20, padding: "12px 16px", borderRadius: 10, background: "rgba(200,160,60,0.08)", border: "1px solid rgba(200,160,60,0.25)", display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 16 }}>⚠️</span>
+                <div>
+                  <div style={{ fontSize: 11, color: "#d4a843", fontWeight: 700, marginBottom: 3 }}>Running in demo mode — photo not analysed</div>
+                  <div style={{ fontSize: 11, color: "#8a7a4a", lineHeight: 1.5 }}>Your routine was built from your skin type and concerns. For Claude to actually read your photo, run this locally with your API key. <a href="https://github.com/paifuu/skincare-analyzer" target="_blank" style={{ color: "#d4a843" }}>GitHub →</a></div>
+                </div>
+              </div>
+            )}
+            {analysis._usedVision && (
+              <div style={{ marginBottom: 20, padding: "10px 16px", borderRadius: 10, background: "rgba(80,180,120,0.06)", border: "1px solid rgba(80,180,120,0.18)", display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 13 }}>✓</span>
+                <div style={{ fontSize: 11, color: "#6ab88a" }}>Claude vision analysed your photo — routine reflects your actual skin</div>
+              </div>
+            )}
 
             {/* Hero */}
             <div style={{ display: "flex", gap: 24, alignItems: "flex-start", marginBottom: 36 }}>
